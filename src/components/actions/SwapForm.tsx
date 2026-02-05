@@ -1,23 +1,29 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { useSmartWallet } from "@/hooks/useSmartWallet";
 import { useTokenBalance } from "@/hooks/useTokens";
-import { TOKENS, DECIMALS } from "@/lib/constants";
-import { getCowSwapQuote, calculateSwapOutput } from "@/lib/cowswap";
-import { ArrowRightLeft, ChevronDown, Info } from "lucide-react";
+import { TOKENS, DECIMALS, isLocalNetwork, getExplorerUrl, UNISWAP } from "@/lib/constants";
+import {
+  getSwapQuote,
+  buildSwapBundle,
+  calculateSwapOutputFallback,
+  type SwapQuote
+} from "@/lib/uniswap";
+import { ArrowRightLeft, ChevronDown, Info, RefreshCw } from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
-import { parseUnits, formatUnits } from "viem";
+import { parseUnits } from "viem";
+import type { Address } from "viem";
 
-// Mock prices - in production would fetch from price oracle
+// Fallback prices for local testing when Uniswap quoter isn't available
 const USDT_PRICE = 1;
 const XAUT0_PRICE = 2650;
 
 export function SwapForm() {
-  const { smartAccountAddress } = useSmartWallet();
+  const { smartAccountAddress, sendTransaction } = useSmartWallet();
   const { formattedBalance: usdtBalance, refetch: refetchUsdt } = useTokenBalance(
     TOKENS.USDT,
     smartAccountAddress || undefined
@@ -29,45 +35,124 @@ export function SwapForm() {
 
   const [sellAmount, setSellAmount] = useState("");
   const [buyAmount, setBuyAmount] = useState("");
+  const [quote, setQuote] = useState<SwapQuote | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [slippage, setSlippage] = useState(0.5);
+  const [isQuoting, setIsQuoting] = useState(false);
+  const [slippage, setSlippage] = useState(5); // 5% default for fork testing
   const [txHash, setTxHash] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [useLocalMode, setUseLocalMode] = useState(isLocalNetwork());
 
-  // Calculate swap output when input changes
-  useEffect(() => {
-    if (sellAmount && parseFloat(sellAmount) > 0) {
-      const output = calculateSwapOutput(
-        sellAmount,
+  // Debounced quote fetching
+  const fetchQuote = useCallback(async (amount: string) => {
+    if (!amount || parseFloat(amount) <= 0) {
+      setBuyAmount("");
+      setQuote(null);
+      return;
+    }
+
+    // Use fallback calculation for local testing or if quoter fails
+    if (useLocalMode) {
+      const output = calculateSwapOutputFallback(
+        amount,
         USDT_PRICE,
         XAUT0_PRICE,
         slippage / 100
       );
       setBuyAmount(output);
-    } else {
-      setBuyAmount("");
+      setQuote(null);
+      return;
     }
-  }, [sellAmount, slippage]);
+
+    setIsQuoting(true);
+    try {
+      const result = await getSwapQuote(
+        TOKENS.USDT as Address,
+        TOKENS.XAUT0 as Address,
+        amount,
+        DECIMALS.USDT
+      );
+
+      if (result) {
+        setQuote(result);
+        setBuyAmount(result.amountOutFormatted);
+      } else {
+        // Fallback to local calculation
+        const output = calculateSwapOutputFallback(
+          amount,
+          USDT_PRICE,
+          XAUT0_PRICE,
+          slippage / 100
+        );
+        setBuyAmount(output);
+        setQuote(null);
+      }
+    } catch (err) {
+      console.error("Quote error:", err);
+      // Fallback to local calculation
+      const output = calculateSwapOutputFallback(
+        amount,
+        USDT_PRICE,
+        XAUT0_PRICE,
+        slippage / 100
+      );
+      setBuyAmount(output);
+      setQuote(null);
+    } finally {
+      setIsQuoting(false);
+    }
+  }, [slippage, useLocalMode]);
+
+  // Fetch quote when sell amount changes
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      fetchQuote(sellAmount);
+    }, 500); // 500ms debounce
+
+    return () => clearTimeout(timer);
+  }, [sellAmount, fetchQuote]);
 
   const handleSwap = async () => {
-    if (!sellAmount || parseFloat(sellAmount) <= 0) return;
-    
+    if (!sellAmount || parseFloat(sellAmount) <= 0 || !smartAccountAddress) return;
+
     setIsLoading(true);
+    setError(null);
+    setTxHash(null);
+
     try {
-      // In a real implementation, this would:
-      // 1. Get quote from CoW Swap API
-      // 2. Sign the order with smart wallet
-      // 3. Submit order to CoW Swap
-      // 4. Wait for execution
-      
-      // For demo purposes, we'll simulate a swap
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      setTxHash("0x" + Math.random().toString(16).slice(2, 42));
-      
-      // Refresh balances
-      refetchUsdt();
-      refetchXaut();
-    } catch (error) {
-      console.error("Swap error:", error);
+      const amountIn = parseUnits(sellAmount, DECIMALS.USDT);
+      const amountOutMin = quote
+        ? quote.amountOut
+        : parseUnits(buyAmount, DECIMALS.XAUT0);
+
+      // Build the bundled approval + swap transaction
+      const transactions = buildSwapBundle(
+        TOKENS.USDT as Address,
+        TOKENS.XAUT0 as Address,
+        amountIn,
+        amountOutMin,
+        smartAccountAddress as Address,
+        slippage
+      );
+
+      // Execute via smart wallet (gasless via Biconomy)
+      const hash = await sendTransaction(transactions);
+      setTxHash(hash);
+
+      // Reset form and refresh balances
+      setSellAmount("");
+      setBuyAmount("");
+      setQuote(null);
+
+      // Refresh balances after a short delay
+      setTimeout(() => {
+        refetchUsdt();
+        refetchXaut();
+      }, 2000);
+
+    } catch (err: any) {
+      console.error("Swap error:", err);
+      setError(err.message || "Swap failed. Please try again.");
     } finally {
       setIsLoading(false);
     }
@@ -77,12 +162,35 @@ export function SwapForm() {
     setSellAmount(usdtBalance);
   };
 
+  const toggleLocalMode = () => {
+    setUseLocalMode(!useLocalMode);
+    // Re-fetch quote with new mode
+    if (sellAmount) {
+      fetchQuote(sellAmount);
+    }
+  };
+
+  const insufficientBalance = parseFloat(sellAmount) > parseFloat(usdtBalance);
+
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <ArrowRightLeft className="w-5 h-5 text-amber-500" />
-          Swap USDT → XAUT0
+        <CardTitle className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <ArrowRightLeft className="w-5 h-5 text-amber-500" />
+            Swap USDT → XAUT0
+          </div>
+          {isLocalNetwork() && (
+            <button
+              onClick={toggleLocalMode}
+              className={`text-xs px-2 py-1 rounded ${useLocalMode
+                ? "bg-yellow-100 text-yellow-700"
+                : "bg-green-100 text-green-700"
+                }`}
+            >
+              {useLocalMode ? "Local Mode" : "Live Quotes"}
+            </button>
+          )}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-6">
@@ -122,7 +230,11 @@ export function SwapForm() {
         {/* Arrow */}
         <div className="flex justify-center">
           <div className="w-10 h-10 bg-gray-100 rounded-full flex items-center justify-center">
-            <ChevronDown className="w-5 h-5 text-gray-400" />
+            {isQuoting ? (
+              <RefreshCw className="w-5 h-5 text-gray-400 animate-spin" />
+            ) : (
+              <ChevronDown className="w-5 h-5 text-gray-400" />
+            )}
           </div>
         </div>
 
@@ -171,8 +283,17 @@ export function SwapForm() {
               <option value={0.1}>0.1%</option>
               <option value={0.5}>0.5%</option>
               <option value={1.0}>1.0%</option>
+              <option value={3.0}>3.0%</option>
+              <option value={5.0}>5.0%</option>
+              <option value={10.0}>10.0%</option>
             </select>
           </div>
+          {quote && (
+            <div className="flex justify-between text-sm">
+              <span className="text-gray-600">Pool Fee</span>
+              <span className="text-gray-900">{quote.poolFee}%</span>
+            </div>
+          )}
           <div className="flex justify-between text-sm">
             <span className="text-gray-600">Network Fee</span>
             <span className="text-green-600 font-medium">Free (sponsored)</span>
@@ -183,22 +304,31 @@ export function SwapForm() {
         <div className="flex items-start gap-2 p-3 bg-blue-50 rounded-lg">
           <Info className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
           <p className="text-sm text-blue-700">
-            Swaps are executed via CoW Swap for the best prices and MEV protection. 
-            No gas fees required.
+            Swaps are executed via Uniswap V3 on Arbitrum.
+            No gas fees required - transactions are sponsored.
           </p>
         </div>
+
+        {/* Error Display */}
+        {error && (
+          <div className="p-3 bg-red-50 rounded-lg border border-red-100">
+            <p className="text-sm text-red-700">{error}</p>
+          </div>
+        )}
 
         {/* Swap Button */}
         <Button
           onClick={handleSwap}
           isLoading={isLoading}
-          disabled={!sellAmount || parseFloat(sellAmount) <= 0 || parseFloat(sellAmount) > parseFloat(usdtBalance)}
+          disabled={!sellAmount || parseFloat(sellAmount) <= 0 || insufficientBalance || isQuoting}
           className="w-full"
           size="lg"
         >
-          {parseFloat(sellAmount) > parseFloat(usdtBalance)
+          {insufficientBalance
             ? "Insufficient Balance"
-            : "Swap USDT → XAUT0"}
+            : isQuoting
+              ? "Getting Quote..."
+              : "Swap USDT → XAUT0"}
         </Button>
 
         {txHash && (
@@ -206,7 +336,7 @@ export function SwapForm() {
             <p className="text-sm text-green-700">
               Swap submitted!{" "}
               <a
-                href={`https://arbiscan.io/tx/${txHash}`}
+                href={getExplorerUrl(txHash)}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="underline font-medium"

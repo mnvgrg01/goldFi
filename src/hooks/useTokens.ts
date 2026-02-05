@@ -16,7 +16,12 @@ export function useTokenBalance(tokenAddress: string, userAddress?: string) {
     },
   });
 
-  const formattedBalance = balance ? formatUnits(balance, DECIMALS.USDT) : "0";
+  // Determine correct decimals based on token address
+  const decimals = tokenAddress.toLowerCase() === TOKENS.XAUT0.toLowerCase()
+    ? DECIMALS.XAUT0
+    : DECIMALS.USDT;
+
+  const formattedBalance = balance ? formatUnits(balance, decimals) : "0";
 
   return {
     balance,

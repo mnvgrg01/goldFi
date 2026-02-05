@@ -11,15 +11,15 @@ const XAUT0_PRICE = 2650; // USD per XAUT0
 
 export function PositionCard() {
   const { smartAccountAddress } = useSmartWallet();
-  const { position, formattedCollateral, formattedBorrowShares, isLoading: positionLoading } = 
+  const { position, formattedCollateral, formattedBorrowAssets, isLoading: positionLoading } =
     useMorphoPosition(smartAccountAddress || undefined);
   const { formattedLiquidity, estimatedApr, isLoading: marketLoading } = useMorphoMarket();
 
   // Calculate position metrics
   const collateralValue = parseFloat(formattedCollateral) * XAUT0_PRICE;
-  // Simplified: assume 1 borrow share = 1 USDT for display
-  const borrowedAmount = parseFloat(formattedBorrowShares);
-  
+  // Use calculated assets for correct display
+  const borrowedAmount = parseFloat(formattedBorrowAssets || "0");
+
   const ltv = calculateLtv(formattedCollateral, borrowedAmount.toString(), XAUT0_PRICE);
   const healthFactor = calculateHealthFactor(formattedCollateral, borrowedAmount.toString(), XAUT0_PRICE);
   const availableToBorrow = Math.max(0, collateralValue * 0.67 - borrowedAmount);
@@ -93,9 +93,8 @@ export function PositionCard() {
                 </div>
                 <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
                   <div
-                    className={`h-full rounded-full transition-all ${
-                      ltv > 60 ? "bg-red-500" : ltv > 50 ? "bg-yellow-500" : "bg-green-500"
-                    }`}
+                    className={`h-full rounded-full transition-all ${ltv > 60 ? "bg-red-500" : ltv > 50 ? "bg-yellow-500" : "bg-green-500"
+                      }`}
                     style={{ width: `${Math.min(ltv, 100)}%` }}
                   />
                 </div>
@@ -107,9 +106,8 @@ export function PositionCard() {
                   <Shield className="w-4 h-4 text-gray-400" />
                   <span className="text-sm text-gray-600">Health Factor</span>
                 </div>
-                <span className={`font-medium ${
-                  healthFactor < 1.2 ? "text-red-600" : healthFactor < 1.5 ? "text-yellow-600" : "text-green-600"
-                }`}>
+                <span className={`font-medium ${healthFactor < 1.2 ? "text-red-600" : healthFactor < 1.5 ? "text-yellow-600" : "text-green-600"
+                  }`}>
                   {healthFactor === Infinity ? "∞" : healthFactor.toFixed(2)}
                 </span>
               </div>

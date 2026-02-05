@@ -5,12 +5,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { useSmartWallet } from "@/hooks/useSmartWallet";
-import { useMorphoPosition, calculateLtv, calculateHealthFactor } from "@/hooks/useMorpho";
+import { useMorphoPosition, calculateLtv } from "@/hooks/useMorpho";
 import { useTokenBalance } from "@/hooks/useTokens";
-import { TOKENS, DECIMALS, MORPHO } from "@/lib/constants";
+import { TOKENS, DECIMALS, MORPHO, getExplorerUrl } from "@/lib/constants";
+import { ERC20_ABI, MORPHO_BLUE_ABI } from "@/lib/abis";
 import { Settings2, Plus, Minus, RotateCcw, AlertTriangle } from "lucide-react";
 import { formatCurrency, formatPercentage } from "@/lib/utils";
-import { parseUnits } from "viem";
+import { parseUnits, encodeFunctionData, type Address } from "viem";
 
 type ActionType = "repay" | "addCollateral" | "withdrawCollateral";
 
@@ -18,14 +19,14 @@ type ActionType = "repay" | "addCollateral" | "withdrawCollateral";
 const XAUT0_PRICE = 2650;
 
 export function ManagePosition() {
-  const { smartAccountAddress } = useSmartWallet();
-  const { position, formattedCollateral, formattedBorrowShares, refetch } = 
+  const { smartAccountAddress, sendTransaction } = useSmartWallet();
+  const { position, formattedCollateral, formattedBorrowAssets, refetch } =
     useMorphoPosition(smartAccountAddress || undefined);
-  const { formattedBalance: usdtBalance } = useTokenBalance(
+  const { formattedBalance: usdtBalance, refetch: refetchUsdt } = useTokenBalance(
     TOKENS.USDT,
     smartAccountAddress || undefined
   );
-  const { formattedBalance: xautBalance } = useTokenBalance(
+  const { formattedBalance: xautBalance, refetch: refetchXaut } = useTokenBalance(
     TOKENS.XAUT0,
     smartAccountAddress || undefined
   );
@@ -34,31 +35,168 @@ export function ManagePosition() {
   const [amount, setAmount] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [txHash, setTxHash] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   // Calculate position metrics
   const collateralValue = parseFloat(formattedCollateral) * XAUT0_PRICE;
-  const borrowedAmount = parseFloat(formattedBorrowShares?.toString() || "0");
+  // Use calculate assets if available, fallback to 0
+  const borrowedAmount = parseFloat(formattedBorrowAssets || "0");
   const currentLtv = calculateLtv(formattedCollateral, borrowedAmount.toString(), XAUT0_PRICE);
 
+  /**
+   * Build repay transaction
+   */
+  const buildRepayTx = (repayAmount: bigint, onBehalf: Address) => {
+    const marketParams = {
+      loanToken: MORPHO.MARKET.loanToken as Address,
+      collateralToken: MORPHO.MARKET.collateralToken as Address,
+      oracle: MORPHO.MARKET.oracle as Address,
+      irm: MORPHO.MARKET.irm as Address,
+      lltv: MORPHO.MARKET.lltv,
+    };
+
+    // Approval tx for USDT
+    const approveTx = {
+      to: TOKENS.USDT as Address,
+      data: encodeFunctionData({
+        abi: ERC20_ABI,
+        functionName: "approve",
+        args: [MORPHO.BLUE as Address, repayAmount],
+      }),
+      value: BigInt(0),
+    };
+
+    // Repay tx
+    const repayTx = {
+      to: MORPHO.BLUE as Address,
+      data: encodeFunctionData({
+        abi: MORPHO_BLUE_ABI,
+        functionName: "repay",
+        args: [marketParams, repayAmount, BigInt(0), onBehalf, "0x"],
+      }),
+      value: BigInt(0),
+    };
+
+    return [approveTx, repayTx];
+  };
+
+  /**
+   * Build add collateral transaction
+   */
+  const buildAddCollateralTx = (collateralAmount: bigint, onBehalf: Address) => {
+    const marketParams = {
+      loanToken: MORPHO.MARKET.loanToken as Address,
+      collateralToken: MORPHO.MARKET.collateralToken as Address,
+      oracle: MORPHO.MARKET.oracle as Address,
+      irm: MORPHO.MARKET.irm as Address,
+      lltv: MORPHO.MARKET.lltv,
+    };
+
+    // Approval tx for XAUT0
+    const approveTx = {
+      to: TOKENS.XAUT0 as Address,
+      data: encodeFunctionData({
+        abi: ERC20_ABI,
+        functionName: "approve",
+        args: [MORPHO.BLUE as Address, collateralAmount],
+      }),
+      value: BigInt(0),
+    };
+
+    // Supply collateral tx
+    const supplyTx = {
+      to: MORPHO.BLUE as Address,
+      data: encodeFunctionData({
+        abi: MORPHO_BLUE_ABI,
+        functionName: "supplyCollateral",
+        args: [marketParams, collateralAmount, onBehalf, "0x"],
+      }),
+      value: BigInt(0),
+    };
+
+    return [approveTx, supplyTx];
+  };
+
+  /**
+   * Build withdraw collateral transaction
+   */
+  const buildWithdrawCollateralTx = (withdrawAmount: bigint, onBehalf: Address, receiver: Address) => {
+    const marketParams = {
+      loanToken: MORPHO.MARKET.loanToken as Address,
+      collateralToken: MORPHO.MARKET.collateralToken as Address,
+      oracle: MORPHO.MARKET.oracle as Address,
+      irm: MORPHO.MARKET.irm as Address,
+      lltv: MORPHO.MARKET.lltv,
+    };
+
+    return {
+      to: MORPHO.BLUE as Address,
+      data: encodeFunctionData({
+        abi: MORPHO_BLUE_ABI,
+        functionName: "withdrawCollateral",
+        args: [marketParams, withdrawAmount, onBehalf, receiver],
+      }),
+      value: BigInt(0),
+    };
+  };
+
   const handleAction = async () => {
-    if (!amount || parseFloat(amount) <= 0 || !activeAction) return;
-    
+    if (!amount || parseFloat(amount) <= 0 || !activeAction || !smartAccountAddress) return;
+
     setIsLoading(true);
+    setError(null);
+    setTxHash(null);
+
     try {
-      // In a real implementation, this would call the appropriate Morpho function
-      // via the smart wallet with Biconomy paymaster
-      
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      setTxHash("0x" + Math.random().toString(16).slice(2, 42));
-      refetch();
-    } catch (error) {
-      console.error("Action error:", error);
+      let transactions: any[];
+
+      switch (activeAction) {
+        case "repay":
+          const repayAmount = parseUnits(amount, DECIMALS.USDT);
+          transactions = buildRepayTx(repayAmount, smartAccountAddress as Address);
+          break;
+
+        case "addCollateral":
+          const collateralAmount = parseUnits(amount, DECIMALS.XAUT0);
+          transactions = buildAddCollateralTx(collateralAmount, smartAccountAddress as Address);
+          break;
+
+        case "withdrawCollateral":
+          const withdrawAmount = parseUnits(amount, DECIMALS.XAUT0);
+          const withdrawTx = buildWithdrawCollateralTx(
+            withdrawAmount,
+            smartAccountAddress as Address,
+            smartAccountAddress as Address
+          );
+          transactions = [withdrawTx];
+          break;
+
+        default:
+          throw new Error("Invalid action");
+      }
+
+      const hash = await sendTransaction(transactions);
+      setTxHash(hash);
+      setAmount("");
+      setActiveAction(null);
+
+      // Refresh balances
+      setTimeout(() => {
+        refetch();
+        refetchUsdt();
+        refetchXaut();
+      }, 2000);
+
+    } catch (err: any) {
+      console.error("Action error:", err);
+      setError(err.message || "Transaction failed");
     } finally {
       setIsLoading(false);
     }
   };
 
   const hasPosition = parseFloat(formattedCollateral) > 0 || borrowedAmount > 0;
+  const maxWithdraw = parseFloat(formattedCollateral) * (1 - (currentLtv / 100) / 0.67);
 
   const renderActionContent = () => {
     switch (activeAction) {
@@ -156,7 +294,6 @@ export function ManagePosition() {
         );
 
       case "withdrawCollateral":
-        const maxWithdraw = parseFloat(formattedCollateral) * (1 - (currentLtv / 100) / 0.67);
         return (
           <div className="space-y-4">
             <div className="space-y-2">
@@ -258,34 +395,31 @@ export function ManagePosition() {
             {/* Action Buttons */}
             <div className="grid grid-cols-3 gap-2">
               <button
-                onClick={() => { setActiveAction("repay"); setAmount(""); }}
-                className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all ${
-                  activeAction === "repay"
-                    ? "border-amber-500 bg-amber-50"
-                    : "border-gray-200 hover:border-gray-300"
-                }`}
+                onClick={() => { setActiveAction("repay"); setAmount(""); setError(null); }}
+                className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all ${activeAction === "repay"
+                  ? "border-amber-500 bg-amber-50"
+                  : "border-gray-200 hover:border-gray-300"
+                  }`}
               >
                 <Minus className="w-5 h-5 text-blue-500" />
                 <span className="text-sm font-medium">Repay</span>
               </button>
               <button
-                onClick={() => { setActiveAction("addCollateral"); setAmount(""); }}
-                className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all ${
-                  activeAction === "addCollateral"
-                    ? "border-amber-500 bg-amber-50"
-                    : "border-gray-200 hover:border-gray-300"
-                }`}
+                onClick={() => { setActiveAction("addCollateral"); setAmount(""); setError(null); }}
+                className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all ${activeAction === "addCollateral"
+                  ? "border-amber-500 bg-amber-50"
+                  : "border-gray-200 hover:border-gray-300"
+                  }`}
               >
                 <Plus className="w-5 h-5 text-green-500" />
                 <span className="text-sm font-medium">Add Coll.</span>
               </button>
               <button
-                onClick={() => { setActiveAction("withdrawCollateral"); setAmount(""); }}
-                className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all ${
-                  activeAction === "withdrawCollateral"
-                    ? "border-amber-500 bg-amber-50"
-                    : "border-gray-200 hover:border-gray-300"
-                }`}
+                onClick={() => { setActiveAction("withdrawCollateral"); setAmount(""); setError(null); }}
+                className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all ${activeAction === "withdrawCollateral"
+                  ? "border-amber-500 bg-amber-50"
+                  : "border-gray-200 hover:border-gray-300"
+                  }`}
               >
                 <Minus className="w-5 h-5 text-red-500" />
                 <span className="text-sm font-medium">Withdraw</span>
@@ -295,12 +429,20 @@ export function ManagePosition() {
             {/* Action Form */}
             {activeAction && renderActionContent()}
 
+            {/* Error Display */}
+            {error && (
+              <div className="p-3 bg-red-50 rounded-lg border border-red-100">
+                <p className="text-sm text-red-700">{error}</p>
+              </div>
+            )}
+
+            {/* Success Message */}
             {txHash && (
               <div className="p-3 bg-green-50 rounded-lg border border-green-100">
                 <p className="text-sm text-green-700">
                   Transaction successful!{" "}
                   <a
-                    href={`https://arbiscan.io/tx/${txHash}`}
+                    href={getExplorerUrl(txHash)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="underline font-medium"
