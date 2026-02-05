@@ -1,16 +1,12 @@
 # GoldFi Testing Guide - Full Flow
 
-This guide explains how to test the complete DeFi flow (Deposit → Swap → Borrow → Manage) using both **Local Anvil Fork** and **Arbitrum Sepolia Testnet**.
+This guide explains how to test the complete DeFi flow (Deposit → Swap → Borrow → Manage) using both Local Anvil Fork
 
 ---
 
 ## Environment Configuration
 
-### Do I need `NEXT_PUBLIC_NETWORK`?
-
 **For Local Anvil Testing: NO** - The app auto-detects localhost and enables local mode.
-
-**For Sepolia Testing: YES** - Add `NEXT_PUBLIC_NETWORK=arbitrumSepolia` to your `.env.local`.
 
 ### Environment Variables
 
@@ -27,24 +23,6 @@ NEXT_PUBLIC_PRIVY_APP_ID=your_privy_app_id
 NEXT_PUBLIC_BICONOMY_PAYMASTER_API_KEY=your_key  # Required for Sepolia
 NEXT_PUBLIC_BICONOMY_BUNDLER_KEY=your_key        # Required for Sepolia
 ```
-
----
-
-## Local Anvil vs Sepolia: What's the Difference?
-
-| Component | Local Anvil Fork | Arbitrum Sepolia |
-|-----------|------------------|------------------|
-| **RPC** | `http://localhost:8545` | `https://sepolia-rollup.arbitrum.io/rpc` |
-| **Chain Data** | Fork of mainnet (real contracts, forked state) | Testnet (may have different/no contracts) |
-| **Tokens** | Real mainnet tokens (USDT, XAUT0) via fork | Testnet tokens (need to deploy/find) |
-| **Gas Fees** | Free (Anvil default accounts have ETH) | Free via Biconomy paymaster |
-| **Transactions** | Direct wallet (bypasses Biconomy) | Smart wallet via Biconomy |
-| **Morpho Blue** | ✅ Works (forked from mainnet) | ⚠️ May not exist on Sepolia |
-| **Uniswap V3** | ✅ Works (forked from mainnet) | ⚠️ Limited pools on Sepolia |
-
-> **Recommendation:** Use **Local Anvil Fork** for development/testing. It provides the full mainnet experience without real funds.
-
----
 
 ## Option A: Testing on Local Anvil Fork (Recommended)
 
@@ -178,42 +156,6 @@ cast call 0x6c247b1F6182318877311737BaC0844bAa518F5e \
 
 ---
 
-## Option B: Testing on Arbitrum Sepolia
-
-> ⚠️ **Note:** Arbitrum Sepolia may not have Morpho Blue or the required Uniswap pools deployed. This option is best for testing Privy + Biconomy integration only.
-
-### Step 1: Configure Environment
-
-```bash
-# .env.local
-NEXT_PUBLIC_ARB_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc
-NEXT_PUBLIC_NETWORK=arbitrumSepolia
-NEXT_PUBLIC_PRIVY_APP_ID=your_privy_app_id
-NEXT_PUBLIC_BICONOMY_PAYMASTER_API_KEY=your_biconomy_key
-NEXT_PUBLIC_BICONOMY_BUNDLER_KEY=your_bundler_key
-```
-
-### Step 2: Get Sepolia ETH
-
-1. Go to [Arbitrum Sepolia Faucet](https://www.alchemy.com/faucets/arbitrum-sepolia)
-2. Request testnet ETH
-3. Bridge to Arbitrum Sepolia if needed
-
-### Step 3: Get Test Tokens
-
-- Find or deploy test USDT and XAUT0 contracts on Sepolia
-- Or modify `constants.ts` with Sepolia token addresses
-
-### Step 4: Start App and Test
-
-```bash
-npm run dev
-```
-
-The app will use Biconomy smart wallet for gasless transactions.
-
----
-
 ## Troubleshooting
 
 ### "Local Mode" indicator not showing
@@ -252,24 +194,3 @@ The app will use Biconomy smart wallet for gasless transactions.
 │  • Real mainnet contracts via fork                              │
 │  • Free gas from Anvil accounts                                 │
 └─────────────────────────────────────────────────────────────────┘
-```
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    ARBITRUM SEPOLIA                             │
-│                                                                 │
-│  ┌─────────┐    ┌──────────┐    ┌─────────┐    ┌────────────┐  │
-│  │ Deposit │ →  │   Swap   │ →  │ Supply  │ →  │   Borrow   │  │
-│  │  USDT   │    │USDT→XAUT0│    │Collateral│   │    USDT    │  │
-│  └─────────┘    └──────────┘    └─────────┘    └────────────┘  │
-│       ↑              ↑              ↑               ↑          │
-│    Faucet       Uniswap V3      Morpho Blue    Morpho Blue     │
-│  or bridge     (if exists)     (if exists)     (if exists)     │
-│                                                                 │
-│  • Biconomy smart wallet (gasless)                              │
-│  • Testnet contracts (may not exist)                           │
-│  • Real testnet transactions                                    │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-**Bottom line:** Use Local Anvil Fork for reliable full-flow testing!
